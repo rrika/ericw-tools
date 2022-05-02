@@ -250,7 +250,7 @@ FreeStackWinding(winding_t *w, pstack_t *stack)
   ==================
 */
 winding_t *
-ClipStackWinding(winding_t *in, pstack_t *stack, plane_t *split)
+ClipStackWinding(winding_t *in, pstack_t *stack, const plane_t *split)
 {
     vec_t dists[MAX_WINDING + 1];
     int sides[MAX_WINDING + 1];
@@ -734,6 +734,8 @@ CalcPortalVis(const mbsp_t *bsp)
     int i, startcount;
     portal_t *p;
 
+    c_targetcheck = 0;
+
 // fastvis just uses mightsee for a very loose bound
     if (fastvis) {
         for (i = 0; i < numportals * 2; i++) {
@@ -760,6 +762,8 @@ CalcPortalVis(const mbsp_t *bsp)
                  c_portalcheck, c_portaltest, c_portalpass);
         logprint("c_vistest: %i  c_mighttest: %i  c_mightseeupdate %i\n",
                  c_vistest, c_mighttest, c_mightseeupdate);
+        logprint("c_targetcheck: %i\n",
+                 c_targetcheck);
     }
 }
 

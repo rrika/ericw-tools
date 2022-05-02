@@ -3,7 +3,7 @@
 #include <vis/leafbits.hh>
 
 unsigned long c_chains;
-int c_vistest, c_mighttest;
+int c_vistest, c_mighttest, c_targetcheck;
 
 static int c_portalskip;
 static int c_leafskip;
@@ -141,6 +141,237 @@ CheckStack(leaf_t *leaf, threaddata_t *thread)
     return 0;
 }
 
+static unsigned
+PopCnt(unsigned long v)
+{
+#if defined __has_builtin
+#if __has_builtin (__builtin_popcount)
+    return __builtin_popcount(v);
+#else
+    for (unsigned c = 0; v; c++)
+        v &= v - 1;
+
+    return c;
+#endif
+#else
+    for (unsigned c = 0; v; c++)
+        v &= v - 1;
+
+    return c;
+#endif
+}
+
+
+/*
+  ==================
+  TargetChecks
+
+  Filter mightsee by clipping against all portals
+  ==================
+*/
+static unsigned
+TargetChecks(const pstack_t* const head, const pstack_t* const prevstack)
+{
+    pstack_t stack;
+    portal_t *p;
+    plane_t backplane;
+    int i, j, numchecks, numblocks;
+    leafblock_t *might, *vis;
+
+    if (prevstack->pass == NULL)
+        return 0;
+
+    numchecks = 0;
+    numblocks = (portalleafs + LEAFMASK) >> LEAFSHIFT;
+
+    stack.next = NULL;
+    stack.leaf = NULL;
+    stack.portal = NULL;
+    stack.numseparators[0] = 0;
+    stack.numseparators[1] = 0;
+
+    for (i = 0; i < STACK_WINDINGS; i++)
+        stack.freewindings[i] = 1;
+
+    stack.mightsee = static_cast<leafbits_t *>(malloc(LeafbitsSize(portalleafs)));
+    might = prevstack->mightsee->bits;
+    vis = stack.mightsee->bits; // starts out empty, gains at most as many bits as 'might'
+
+    for (i = 0; i < numblocks; i++)
+        vis[i] = 0;
+
+    // check all portals for flowing into other leafs
+    for (i = 0, p = portals; i < numportals * 2; i++, p++) {
+
+        if (TestLeafBit(stack.mightsee, p->leaf))
+            continue;           // target check already done and passed
+
+        if (!TestLeafBit(prevstack->mightsee, p->leaf))
+            continue;           // can't possibly see it
+
+        // get plane of portal, point normal into the neighbor leaf
+        stack.portalplane = p->plane;
+        VectorSubtract(vec3_origin, p->plane.normal, backplane.normal);
+        backplane.dist = -p->plane.dist;
+
+        if (VectorCompare(prevstack->portalplane.normal, backplane.normal, EQUAL_EPSILON))
+            continue;           // can't go out a coplanar face
+
+        numchecks++;
+
+        stack.portal = p;
+
+        /*
+         * Testing visibility of a target portal, from a source portal,
+         * looking through a pass portal.
+         *
+         *    source portal  =>  pass portal      =>  target portal
+         *    stack.source   =>  prevstack->pass  =>  stack.pass
+         *
+         * If we can see part of the target portal, we use that clipped portal
+         * as the pass portal into the next leaf.
+         */
+
+        /* Clip any part of the target portal behind the source portal */
+        stack.pass = ClipStackWinding(p->winding, &stack,
+                                      &head->portalplane);
+        if (!stack.pass)
+            continue;
+
+        /* Clip any part of the target portal behind the pass portal */
+        stack.pass = ClipStackWinding(stack.pass, &stack,
+                                      &prevstack->portalplane);
+        if (!stack.pass)
+            continue;
+
+        /* Clip any part of the source portal in front of the target portal */
+        stack.source = ClipStackWinding(prevstack->source, &stack,
+                                        &backplane);
+        if (!stack.source) {
+            FreeStackWinding(stack.pass, &stack);
+            continue;
+        }
+
+        /* TEST 0 :: source -> pass -> target */
+        if (testlevel > 0) {
+            if (stack.numseparators[0]) {
+                for (j = 0; j < stack.numseparators[0]; j++) {
+                    stack.pass = ClipStackWinding(stack.pass, &stack,
+                                                  &stack.separators[0][j]);
+                    if (!stack.pass)
+                        break;
+                }
+            } else {
+                /* Using prevstack source for separator cache correctness */
+                stack.pass = ClipToSeperators(prevstack->source,
+                                              head->portalplane,
+                                              prevstack->pass, stack.pass, 0,
+                                              &stack);
+            }
+            if (!stack.pass) {
+                FreeStackWinding(stack.source, &stack);
+                continue;
+            }
+        }
+
+        /* TEST 1 :: pass -> source -> target */
+        if (testlevel > 1) {
+            if (stack.numseparators[1]) {
+                for (j = 0; j < stack.numseparators[1]; j++) {
+                    stack.pass = ClipStackWinding(stack.pass, &stack,
+                                                  &stack.separators[1][j]);
+                    if (!stack.pass)
+                        break;
+                }
+            } else {
+                /* Using prevstack source for separator cache correctness */
+                stack.pass = ClipToSeperators(prevstack->pass,
+                                              prevstack->portalplane,
+                                              prevstack->source, stack.pass, 1,
+                                              &stack);
+            }
+            if (!stack.pass) {
+                FreeStackWinding(stack.source, &stack);
+                continue;
+            }
+        }
+
+        /* TEST 2 :: target -> pass -> source */
+        if (testlevel > 2) {
+            stack.source = ClipToSeperators(stack.pass, stack.portalplane,
+                                            prevstack->pass, stack.source, 2,
+                                            &stack);
+            if (!stack.source) {
+                FreeStackWinding(stack.pass, &stack);
+                continue;
+            }
+        }
+
+        /* TEST 3 :: pass -> target -> source */
+        if (testlevel > 3) {
+            stack.source = ClipToSeperators(prevstack->pass,
+                                            prevstack->portalplane, stack.pass,
+                                            stack.source, 3, &stack);
+            if (!stack.source) {
+                FreeStackWinding(stack.pass, &stack);
+                continue;
+            }
+        }
+
+        SetLeafBit(stack.mightsee, p->leaf);
+
+        FreeStackWinding(stack.source, &stack);
+        FreeStackWinding(stack.pass, &stack);
+    }
+
+    // transfer results back to prevstack
+    for (i = 0; i < numblocks; i++)
+        might[i] &= vis[i];
+
+    free(stack.mightsee);
+
+    return numchecks;
+}
+
+
+/*
+  ==================
+  IterativeTargetChecks
+
+  Retrace the path and reduce mightsee by clipping the targets directly
+  ==================
+*/
+static unsigned
+IterativeTargetChecks(pstack_t* const head)
+{
+    unsigned numchecks, numblocks;
+
+    numchecks = 0;
+    numblocks = (portalleafs + LEAFMASK) >> LEAFSHIFT;
+
+    for (pstack_t* stack = head; stack; stack = stack->next)
+    {
+        if (stack->didTargetChecks)
+            continue;
+
+        numchecks += TargetChecks(head, stack);
+
+        if (stack->next)
+        {
+            pstack_t* next = stack->next;
+            for (int i = 0; i < numblocks; i++)
+                next->mightsee->bits[i] &= stack->mightsee->bits[i];
+        }
+
+        // mark done
+        stack->didTargetChecks = true;
+        stack->numExpectedTargetChecks = 0;
+    }
+
+    return numchecks;
+}
+
+
 /*
   ==================
   RecursiveLeafFlow
@@ -156,7 +387,7 @@ RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack)
     portal_t *p;
     plane_t backplane;
     leaf_t *leaf;
-    int i, j, err, numblocks;
+    int i, j, err, numblocks, nummightsee;
     leafblock_t *test, *might, *vis, more;
 
     ++c_chains;
@@ -180,6 +411,16 @@ RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack)
     if (!TestLeafBit(thread->leafvis, leafnum)) {
         SetLeafBit(thread->leafvis, leafnum);
         thread->base->numcansee++;
+    }
+
+    // check all target portals instead of just neighbor portals, if the time is right
+    if (prevstack->numExpectedTargetChecks > 0 &&
+        thread->numSteps >= thread->numTargetChecks + prevstack->numExpectedTargetChecks)
+    {
+        unsigned numActualTargetChecks = IterativeTargetChecks(&thread->pstack_head);
+        c_targetcheck += numActualTargetChecks;
+        thread->numTargetChecks += numActualTargetChecks;
+        // prevstack->numExpectedTargetChecks is zero now
     }
 
     prevstack->next = &stack;
@@ -214,11 +455,13 @@ RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack)
             test = p->mightsee->bits;
         }
 
+        nummightsee = 0;
         more = 0;
         numblocks = (portalleafs + LEAFMASK) >> LEAFSHIFT;
         for (j = 0; j < numblocks; j++) {
             might[j] = prevstack->mightsee->bits[j] & test[j];
             more |= (might[j] & ~vis[j]);
+            nummightsee += PopCnt(might[j]);
         }
 
         if (!more) {
@@ -226,6 +469,10 @@ RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack)
             c_portalskip++;
             continue;
         }
+
+        stack.didTargetChecks = false;
+        stack.numExpectedTargetChecks = nummightsee;
+
         // get plane of portal, point normal into the neighbor leaf
         stack.portalplane = p->plane;
         VectorSubtract(vec3_origin, p->plane.normal, backplane.normal);
@@ -234,6 +481,7 @@ RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t *prevstack)
         if (VectorCompare(prevstack->portalplane.normal, backplane.normal, EQUAL_EPSILON))
             continue;           // can't go out a coplanar face
 
+        thread->numSteps++;
         c_portalcheck++;
 
         stack.portal = p;
@@ -383,6 +631,8 @@ PortalFlow(portal_t *p)
     data.pstack_head.source = p->winding;
     data.pstack_head.portalplane = p->plane;
     data.pstack_head.mightsee = p->mightsee;
+    data.numSteps = 0;
+    data.numTargetChecks = 0;
 
     RecursiveLeafFlow(p->leaf, &data, &data.pstack_head);
 }

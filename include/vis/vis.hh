@@ -92,16 +92,20 @@ typedef struct pstack_s {
     leafbits_t *mightsee;       // bit string
     plane_t separators[2][MAX_SEPARATORS]; /* Separator cache */
     int numseparators[2];
+    char didTargetChecks;
+    unsigned numExpectedTargetChecks;
 } pstack_t;
 
 winding_t *AllocStackWinding(pstack_t *stack);
 void FreeStackWinding(winding_t *w, pstack_t *stack);
-winding_t *ClipStackWinding(winding_t *in, pstack_t *stack, plane_t *split);
+winding_t *ClipStackWinding(winding_t *in, pstack_t *stack, const plane_t *split);
 
 typedef struct {
     leafbits_t *leafvis;
     portal_t *base;
     pstack_t pstack_head;
+    unsigned numSteps;
+    unsigned numTargetChecks;
 } threaddata_t;
 
 extern int numportals;
@@ -114,7 +118,7 @@ extern leaf_t *leafs;
 
 extern int c_noclip;
 extern int c_portaltest, c_portalpass, c_portalcheck;
-extern int c_vistest, c_mighttest;
+extern int c_vistest, c_mighttest, c_targetcheck;
 extern unsigned long c_chains;
 
 extern qboolean showgetleaf;
